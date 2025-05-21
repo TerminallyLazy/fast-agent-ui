@@ -1,6 +1,6 @@
 # Fast Agent UI
 
-A modern, feature-rich user interface for the Fast Agent framework.
+A modern, feature-rich user interface for the brilliant fast-agent framework. https://github.com/evalstate/fast-agent
 
 ## Features
 
