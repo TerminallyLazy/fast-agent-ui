@@ -37,7 +37,6 @@ ENV/
 *.swp
 *.swo
 
-ui/node_modules/
+node_modules 
 
-ui/.next/
-
+.next
