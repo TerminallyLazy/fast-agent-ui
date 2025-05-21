@@ -1,0 +1,171 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Light mode - unique off-white theme with subtle blue accents */
+    --background: 210 40% 98%;
+    --foreground: 222 47% 11%;
+    
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+    
+    --primary: 222 47% 35%;
+    --primary-foreground: 210 40% 98%;
+    
+    --secondary: 210 40% 94%;
+    --secondary-foreground: 222 47% 35%;
+    
+    --muted: 210 40% 94%;
+    --muted-foreground: 215 25% 40%;
+    
+    --accent: 199 89% 48%;
+    --accent-foreground: 210 40% 98%;
+    
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 40% 98%;
+    
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --ring: 222 47% 35%;
+    
+    /* Unique UI elements */
+    --success: 142 72% 29%;
+    --success-foreground: 210 40% 98%;
+    
+    --warning: 38 92% 50%;
+    --warning-foreground: 210 40% 98%;
+    
+    --info: 199 89% 48%;
+    --info-foreground: 210 40% 98%;
+    
+    --radius: 0.5rem;
+  }
+ 
+  .dark {
+    /* Dark mode - futuristic dark theme with vibrant accents */
+    --background: 222 47% 5%;
+    --foreground: 210 40% 98%;
+    
+    --card: 222 47% 8%;
+    --card-foreground: 210 40% 98%;
+    
+    --popover: 222 47% 8%;
+    --popover-foreground: 210 40% 98%;
+    
+    --primary: 199 89% 48%;
+    --primary-foreground: 222 47% 5%;
+    
+    --secondary: 222 47% 12%;
+    --secondary-foreground: 210 40% 98%;
+    
+    --muted: 222 47% 12%;
+    --muted-foreground: 215 25% 65%;
+    
+    --accent: 263 70% 50%;
+    --accent-foreground: 210 40% 98%;
+    
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 40% 98%;
+    
+    --border: 222 47% 15%;
+    --input: 222 47% 15%;
+    --ring: 199 89% 48%;
+    
+    /* Unique UI elements */
+    --success: 142 72% 29%;
+    --success-foreground: 210 40% 98%;
+    
+    --warning: 38 92% 50%;
+    --warning-foreground: 210 40% 98%;
+    
+    --info: 199 89% 48%;
+    --info-foreground: 210 40% 98%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+@layer components {
+  /* React Flow Dark Mode and Fancy UI Overrides */
+  .reactflow-gradient-border {
+    padding: 4px;
+    border-radius: var(--radius);
+    background-color: hsl(var(--secondary));
+  }
+  .dark .reactflow-gradient-border {
+    background: linear-gradient(45deg, hsl(var(--accent)), hsl(var(--primary)));
+  }
+  .reactflow-inner {
+    width: 100%;
+    height: 100%;
+    background-color: hsl(var(--background));
+    border-radius: calc(var(--radius) - 4px);
+    overflow: hidden;
+  }
+  .react-flow__node, .react-flow__node-input, .react-flow__node-output {
+    background-color: hsl(var(--card)) !important;
+    color: hsl(var(--card-foreground)) !important;
+    border: 1px solid hsl(var(--border)) !important;
+    box-shadow: 0 0 8px hsla(var(--accent), 0.6) !important;
+  }
+  .react-flow__node .react-flow__node-label {
+    color: hsl(var(--card-foreground)) !important;
+  }
+  .react-flow__minimap {
+    background-color: transparent !important;
+  }
+  .react-flow__minimap-node {
+    stroke: hsl(var(--border)) !important;
+    fill: hsl(var(--card)) !important;
+  }
+  .react-flow__minimap-mask {
+    fill: rgba(0, 0, 0, 0.6) !important;
+  }
+  .react-flow__controls {
+    background-color: hsl(var(--card)) !important;
+    border-radius: var(--radius) !important;
+    box-shadow: 0 0 4px hsla(var(--accent), 0.6) !important;
+  }
+  .react-flow__controls button {
+    color: hsl(var(--foreground)) !important;
+    background-color: transparent !important;
+  }
+  .react-flow__controls button svg {
+    fill: hsl(var(--foreground)) !important;
+  }
+  .react-flow__controls button:hover {
+    background-color: hsl(var(--secondary)) !important;
+  }
+  /* Handles and Edge Styling */
+  .react-flow__handle {
+    width: 12px;
+    height: 12px;
+    background: hsl(var(--accent)) !important;
+    border: 2px solid hsl(var(--primary)) !important;
+  }
+  .react-flow__edge-path {
+    stroke: hsl(var(--accent)) !important;
+    stroke-width: 2px !important;
+  }
+  .react-flow__arrowhead {
+    fill: hsl(var(--accent)) !important;
+  }
+  /* Custom FastNode wrapper */
+  .react-flow__node-fast {
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+  }
+}

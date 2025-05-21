@@ -1,0 +1,1593 @@
+# Files and Resources
+
+## Attaching Files
+
+You can include files in a conversation using Paths:
+
+```python
+from mcp_agent.core.prompt import Prompt
+from pathlib import Path
+
+plans = agent.send(
+    Prompt.user(
+        "Summarise this PDF",
+        Path("secret-plans.pdf")
+    )
+)
+
+```
+
+This works for any mime type that can be tokenized by the model.
+
+## MCP Resources
+
+MCP Server resources can be conveniently included in a message with:
+
+```python
+description = agent.with_resource(
+    "What is in this image?",
+    "mcp_image_server",
+    "resource://images/cat.png"
+)
+
+```
+
+## Prompt Files
+
+Prompt Files can include Resources:
+
+agent_script.txt
+
+```md
+---USER
+Please extract the major colours from this CSS file:
+---RESOURCE
+index.css
+
+```
+
+They can either be loaded with the `load_prompt_multipart` function, or delivered via the built-in `prompt-server`.
+
+# Defining Agents and Workflows
+
+## Basic Agents
+
+Defining an agent is as simple as:
+
+```python
+@fast.agent(
+  instruction="Given an object, respond only with an estimate of its size."
+)
+
+```
+
+We can then send messages to the Agent:
+
+```python
+async with fast.run() as agent:
+  moon_size = await agent("the moon")
+  print(moon_size)
+
+```
+
+Or start an interactive chat with the Agent:
+
+```python
+async with fast.run() as agent:
+  await agent.interactive()
+
+```
+
+Here is the complete `sizer.py` Agent application, with boilerplate code:
+
+sizer.py
+
+```python
+import asyncio
+from mcp_agent.core.fastagent import FastAgent
+
+# Create the application
+fast = FastAgent("Agent Example")
+
+@fast.agent(
+  instruction="Given an object, respond only with an estimate of its size."
+)
+async def main():
+  async with fast.run() as agent:
+    await agent()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+```
+
+The Agent can then be run with `uv run sizer.py`.
+
+Specify a model with the `--model` switch - for example `uv run sizer.py --model sonnet`.
+
+## Workflows and MCP Servers
+
+*To generate examples use `fast-agent quickstart workflow`. This example can be run with `uv run workflow/chaining.py`. fast-agent looks for configuration files in the current directory before checking parent directories recursively.*
+
+Agents can be chained to build a workflow, using MCP Servers defined in the `fastagent.config.yaml` file:
+
+fastagent.config.yaml
+
+```yaml
+# Example of a STDIO sever named "fetch"
+mcp:
+  servers:
+    fetch:
+      command: "uvx"
+      args: ["mcp-server-fetch"]
+
+```
+
+social.py
+
+```python
+@fast.agent(
+    "url_fetcher",
+    "Given a URL, provide a complete and comprehensive summary",
+    servers=["fetch"], # Name of an MCP Server defined in fastagent.config.yaml
+)
+@fast.agent(
+    "social_media",
+    """
+    Write a 280 character social media post for any given text.
+    Respond only with the post, never use hashtags.
+    """,
+)
+@fast.chain(
+    name="post_writer",
+    sequence=["url_fetcher", "social_media"],
+)
+async def main():
+    async with fast.run() as agent:
+        # using chain workflow
+        await agent.post_writer("http://fast-agent.ai")
+
+```
+
+All Agents and Workflows respond to `.send("message")`. The agent app responds to `.interactive()` to start a chat session.
+
+Saved as `social.py` we can now run this workflow from the command line with:
+
+```bash
+uv run workflow/chaining.py --agent post_writer --message "<url>"
+
+```
+
+Add the `--quiet` switch to disable progress and message display and return only the final response - useful for simple automations.
+
+Read more about running **fast-agent** agents [here](../running/)
+
+## Workflow Types
+
+**fast-agent** has built-in support for the patterns referenced in Anthropic's [Building Effective Agents](https://www.anthropic.com/research/building-effective-agents) paper.
+
+### Chain
+
+The `chain` workflow offers a declarative approach to calling Agents in sequence:
+
+```python
+@fast.chain(
+  "post_writer",
+   sequence=["url_fetcher","social_media"]
+)
+
+# we can them prompt it directly:
+async with fast.run() as agent:
+  await agent.interactive(agent="post_writer")
+
+```
+
+This starts an interactive session, which produces a short social media post for a given URL. If a *chain* is prompted it returns to a chat with last Agent in the chain. You can switch agents by typing `@agent-name`.
+
+Chains can be incorporated in other workflows, or contain other workflow elements (including other Chains). You can set an `instruction` to describe it's capabilities to other workflow steps if needed.
+
+Chains are also helpful for capturing content before being dispatched by a `router`, or summarizing content before being used in the downstream workflow.
+
+### Human Input
+
+Agents can request Human Input to assist with a task or get additional context:
+
+```python
+@fast.agent(
+    instruction="An AI agent that assists with basic tasks. Request Human Input when needed.",
+    human_input=True,
+)
+
+await agent("print the next number in the sequence")
+
+```
+
+In the example `human_input.py`, the Agent will prompt the User for additional information to complete the task.
+
+### Parallel
+
+The Parallel Workflow sends the same message to multiple Agents simultaneously (`fan-out`), then uses the `fan-in` Agent to process the combined content.
+
+```python
+@fast.agent("translate_fr", "Translate the text to French")
+@fast.agent("translate_de", "Translate the text to German")
+@fast.agent("translate_es", "Translate the text to Spanish")
+
+@fast.parallel(
+  name="translate",
+  fan_out=["translate_fr","translate_de","translate_es"]
+)
+
+@fast.chain(
+  "post_writer",
+   sequence=["url_fetcher","social_media","translate"]
+)
+
+```
+
+If you don't specify a `fan-in` agent, the `parallel` returns the combined Agent results verbatim.
+
+`parallel` is also useful to ensemble ideas from different LLMs.
+
+When using `parallel` in other workflows, specify an `instruction` to describe its operation.
+
+### Evaluator-Optimizer
+
+Evaluator-Optimizers combine 2 agents: one to generate content (the `generator`), and the other to judge that content and provide actionable feedback (the `evaluator`). Messages are sent to the generator first, then the pair run in a loop until either the evaluator is satisfied with the quality, or the maximum number of refinements is reached. The final result from the Generator is returned.
+
+If the Generator has `use_history` off, the previous iteration is returned when asking for improvements - otherwise conversational context is used.
+
+```python
+@fast.evaluator_optimizer(
+  name="researcher"
+  generator="web_searcher"
+  evaluator="quality_assurance"
+  min_rating="EXCELLENT"
+  max_refinements=3
+)
+
+async with fast.run() as agent:
+  await agent.researcher.send("produce a report on how to make the perfect espresso")
+
+```
+
+When used in a workflow, it returns the last `generator` message as the result.
+
+See the `evaluator.py` workflow example, or `fast-agent quickstart researcher` for a more complete example.
+
+### Router
+
+Routers use an LLM to assess a message, and route it to the most appropriate Agent. The routing prompt is automatically generated based on the Agent instructions and available Servers.
+
+```python
+@fast.router(
+  name="route"
+  agents["agent1","agent2","agent3"]
+)
+
+```
+
+NB - If only one agent is supplied to the router, it forwards directly.
+
+Look at the `router.py` workflow for an example.
+
+### Orchestrator
+
+Given a complex task, the Orchestrator uses an LLM to generate a plan to divide the task amongst the available Agents. The planning and aggregation prompts are generated by the Orchestrator, which benefits from using more capable models. Plans can either be built once at the beginning (`plantype="full"`) or iteratively (`plantype="iterative"`).
+
+```python
+@fast.orchestrator(
+  name="orchestrate"
+  agents=["task1","task2","task3"]
+)
+
+```
+
+See the `orchestrator.py` or `agent_build.py` workflow example.
+
+## Agent and Workflow Reference
+
+### Calling Agents
+
+All definitions allow omitting the name and instructions arguments for brevity:
+
+```python
+@fast.agent("You are a helpful agent")          # Create an agent with a default name.
+@fast.agent("greeter","Respond cheerfully!")    # Create an agent with the name "greeter"
+
+moon_size = await agent("the moon")             # Call the default (first defined agent) with a message
+
+result = await agent.greeter("Good morning!")   # Send a message to an agent by name using dot notation
+result = await agent.greeter.send("Hello!")     # You can call 'send' explicitly
+
+agent["greeter"].send("Good Evening!")          # Dictionary access to agents is also supported
+
+```
+
+Read more about prompting agents [here](../prompting/)
+
+## Configuring Agent Request Parameters
+
+You can customize how an agent interacts with the LLM by passing `request_params=RequestParams(...)` when defining it.
+
+### Example
+
+```python
+from mcp_agent.core.request_params import RequestParams
+
+@fast.agent(
+  name="CustomAgent",                              # name of the agent
+  instruction="You have my custom configurations", # base instruction for the agent
+  request_params=RequestParams(
+    maxTokens=8192,
+    use_history=False,
+    max_iterations=20
+  )
+)
+
+```
+
+### Available RequestParams Fields
+
+| Field | Type | Default | Description | | --- | --- | --- | --- | | `maxTokens` | `int` | `2048` | The maximum number of tokens to sample, as requested by the server | | `model` | `string` | `None` | The model to use for the LLM generation. Can only be set at Agent creation time | | `use_history` | `bool` | `True` | Agent/LLM maintains conversation history. Does not include applied Prompts | | `max_iterations` | `int` | `20` | The maximum number of tool calls allowed in a conversation turn | | `parallel_tool_calls` | `bool` | `True` | Whether to allow simultaneous tool calls | | `response_format` | `Any` | `None` | Response format for structured calls (advanced use). Prefer to use `structured` with a Pydantic model instead | | `template_vars` | `Dict[str,Any]` | `{}` | Dictionary of template values for dynamic templates. Currently only supported for TensorZero provider | | `temperature` | `float` | `None` | Temperature to use for the completion request |
+
+### Defining Agents
+
+#### Basic Agent
+
+```python
+@fast.agent(
+  name="agent",                          # name of the agent
+  instruction="You are a helpful Agent", # base instruction for the agent
+  servers=["filesystem"],                # list of MCP Servers for the agent
+  model="o3-mini.high",                  # specify a model for the agent
+  use_history=True,                      # agent maintains chat history
+  request_params=RequestParams(temperature= 0.7), # additional parameters for the LLM (or RequestParams())
+  human_input=True,                      # agent can request human input
+)
+
+```
+
+#### Chain
+
+```python
+@fast.chain(
+  name="chain",                          # name of the chain
+  sequence=["agent1", "agent2", ...],    # list of agents in execution order
+  instruction="instruction",             # instruction to describe the chain for other workflows
+  cumulative=False                       # whether to accumulate messages through the chain
+  continue_with_final=True,              # open chat with agent at end of chain after prompting
+)
+
+```
+
+#### Parallel
+
+```python
+@fast.parallel(
+  name="parallel",                       # name of the parallel workflow
+  fan_out=["agent1", "agent2"],          # list of agents to run in parallel
+  fan_in="aggregator",                   # name of agent that combines results (optional)
+  instruction="instruction",             # instruction to describe the parallel for other workflows
+  include_request=True,                  # include original request in fan-in message
+)
+
+```
+
+#### Evaluator-Optimizer
+
+```python
+@fast.evaluator_optimizer(
+  name="researcher",                     # name of the workflow
+  generator="web_searcher",              # name of the content generator agent
+  evaluator="quality_assurance",         # name of the evaluator agent
+  min_rating="GOOD",                     # minimum acceptable quality (EXCELLENT, GOOD, FAIR, POOR)
+  max_refinements=3,                     # maximum number of refinement iterations
+)
+
+```
+
+#### Router
+
+```python
+@fast.router(
+  name="route",                          # name of the router
+  agents=["agent1", "agent2", "agent3"], # list of agent names router can delegate to
+  instruction="routing instruction",     # any extra routing instructions
+  servers=["filesystem"]                 # list of servers for the routing agent
+  model="o3-mini.high",                  # specify routing model
+  use_history=False,                     # router maintains conversation history
+  human_input=False,                     # whether router can request human input
+)
+
+```
+
+#### Orchestrator
+
+```python
+@fast.orchestrator(
+  name="orchestrator",                   # name of the orchestrator
+  instruction="instruction",             # base instruction for the orchestrator
+  agents=["agent1", "agent2"],           # list of agent names this orchestrator can use
+  model="o3-mini.high",                  # specify orchestrator planning model
+  use_history=False,                     # orchestrator doesn't maintain chat history (no effect).
+  human_input=False,                     # whether orchestrator can request human input
+  plan_type="full",                      # planning approach: "full" or "iterative"
+  max_iterations=5,                      # maximum number of full plan attempts, or iterations
+)
+
+```
+
+# Prompting Agents
+
+**fast-agent** provides a flexible MCP based API for sending messages to agents, with convenience methods for handling Files, Prompts and Resources.
+
+Read more about the use of MCP types in **fast-agent** [here](../../mcp/types/).
+
+## Sending Messages
+
+The simplest way of sending a message to an agent is the `send` method:
+
+```python
+response: str = await agent.send("how are you?")
+
+```
+
+This returns the text of the agent's response as a string, making it ideal for simple interactions.
+
+You can attach files by using `Prompt.user()` method to construct your message:
+
+```python
+from mcp_agent.core.prompt import Prompt
+from pathlib import Path
+
+plans: str = await agent.send(
+    Prompt.user(
+        "Summarise this PDF",
+        Path("secret-plans.pdf")
+    )
+)
+
+```
+
+`Prompt.user()` automatically converts content to the appropriate MCP Type. For example, `image/png` becomes `ImageContent` and `application/pdf` becomes an EmbeddedResource.
+
+You can also use MCP Types directly - for example:
+
+```python
+from mcp.types import ImageContent, TextContent
+
+mcp_text: TextContent = TextContent(type="text", text="Analyse this image.")
+mcp_image: ImageContent = ImageContent(type="image", 
+                          mimeType="image/png",
+                          data=base_64_encoded)
+
+response: str  = await agent.send(
+    Prompt.user(
+        mcp_text,
+        mcp_image
+    )
+)
+
+```
+
+> Note: use `Prompt.assistant()` to produce messages for the `assistant` role.
+
+### Using `generate()` and multipart content
+
+The `generate()` method allows you to access multimodal content from an agent, or its Tool Calls as well as send conversational pairs.
+
+```python
+from mcp_agent.core.prompt import Prompt
+from mcp_agent.mcp.prompt_message_multipart import PromptMessageMultipart
+
+message = Prompt.user("Describe an image of a sunset")
+
+response: PromptMessageMultipart = await agent.generate([message])
+
+print(response.last_text())  # Main text response
+
+```
+
+The key difference between `send()` and `generate()` is that `generate()` returns a `PromptMessageMultipart` object, giving you access to the complete response structure:
+
+- `last_text()`: Gets the main text response
+- `first_text()`: Gets the first text content if multiple text blocks exist
+- `all_text()`: Combines all text content in the response
+- `content`: Direct access to the full list of content parts, including Images and EmbeddedResources
+
+This is particularly useful when working with multimodal responses or tool outputs:
+
+```python
+# Generate a response that might include multiple content types
+response = await agent.generate([
+    Prompt.user("Analyze this image", Path("chart.png"))
+])
+
+for content in response.content:
+    if content.type == "text":
+        print("Text response:", content.text[:100], "...")
+    elif content.type == "image":
+        print("Image content:", content.mimeType)
+    elif content.type == "resource":
+        print("Resource:", content.resource.uri)
+
+```
+
+You can also use `generate()` for multi-turn conversations by passing multiple messages:
+
+```python
+messages = [
+    Prompt.user("What is the capital of France?"),
+    Prompt.assistant("The capital of France is Paris."),
+    Prompt.user("And what is its population?")
+]
+
+response = await agent.generate(messages)
+
+```
+
+The `generate()` method provides the foundation for working with content returned by the LLM, and MCP Tool, Prompt and Resource calls.
+
+### Using `structured()` for typed responses
+
+When you need the agent to return data in a specific format, use the `structured()` method. This parses the agent's response into a Pydantic model:
+
+```python
+from pydantic import BaseModel
+from typing import List
+
+# Define your expected response structure
+class CityInfo(BaseModel):
+    name: str
+    country: str
+    population: int
+    landmarks: List[str]
+
+# Request structured information
+result, message = await agent.structured(
+    [Prompt.user("Tell me about Paris")], 
+    CityInfo
+)
+
+# Now you have strongly typed data
+if result:
+    print(f"City: {result.name}, Population: {result.population:,}")
+    for landmark in result.landmarks:
+        print(f"- {landmark}")
+
+```
+
+The `structured()` method returns a tuple containing:
+
+1. The parsed Pydantic model instance (or `None` if parsing failed)
+1. The full `PromptMessageMultipart` response
+
+This approach is ideal for:
+
+- Extracting specific data points in a consistent format
+- Building workflows where agents need structured inputs/outputs
+- Integrating agent responses with typed systems
+
+Always check if the first value is `None` to handle cases where the response couldn't be parsed into your model:
+
+```python
+result, message = await agent.structured([Prompt.user("Describe Paris")], CityInfo)
+
+if result is None:
+    # Fall back to the text response
+    print("Could not parse structured data, raw response:")
+    print(message.last_text())
+
+```
+
+The `structured()` method provides the same request parameter options as `generate()`.
+
+Note
+
+LLMs produce JSON when producing Structured responses, which can conflict with Tool Calls. Use a `chain` to combine Tool Calls with Structured Outputs.
+
+## MCP Prompts
+
+Apply a Prompt from an MCP Server to the agent with:
+
+```python
+response: str = await agent.apply_prompt(
+    "setup_sizing",
+    arguments: {"units","metric"}
+)
+
+```
+
+You can list and get Prompts from attached MCP Servers:
+
+```python
+from mcp.types import GetPromptResult, PromptMessage
+
+prompt: GetPromptResult = await agent.get_prompt("setup_sizing")
+first_message: PromptMessage = prompt[0]
+
+```
+
+and send the native MCP `PromptMessage` to the agent with:
+
+```python
+response: str = agent.send(first_message)
+
+```
+
+> If the last message in the conversation is from the `assistant`, it is returned as the response.
+
+## MCP Resources
+
+`Prompt.user` also works with MCP Resources:
+
+```python
+from mcp.types import ReadResourceResult
+
+resource: ReadResourceResult = agent.get_resource(
+    "resource://images/cat.png", "mcp_server_name" 
+)
+response: str = agent.send(
+    Prompt.user("What is in this image?", resource)
+)
+
+```
+
+Alternatively, use the *with_resource* convenience method:
+
+```python
+response: str = agent.with_resource(
+    "What is in this image?",
+    "resource://images/cat.png"
+    "mcp_server_name",
+)
+
+```
+
+## Prompt Files
+
+Long prompts can be stored in text files, and loaded with the `load_prompt` utility:
+
+```python
+from mcp_agent.mcp.prompts import load_prompt
+from mcp.types import PromptMessage
+
+prompt: List[PromptMessage] = load_prompt(Path("two_cities.txt"))
+result: str = await agent.send(prompt[0])
+
+```
+
+two_cities.txt
+
+```markdown
+### The Period
+
+It was the best of times, it was the worst of times, it was the age of
+wisdom, it was the age of foolishness, it was the epoch of belief, it was
+the epoch of incredulity, ...
+
+```
+
+Prompts files can contain conversations to aid in-context learning or allow you to replay conversations with the Playback LLM:
+
+sizing_conversation.txt
+
+```markdown
+---USER
+the moon
+---ASSISTANT
+object: MOON
+size: 3,474.8
+units: KM
+---USER
+the earth
+---ASSISTANT
+object: EARTH
+size: 12,742
+units: KM
+---USER
+how big is a tiger?
+---ASSISTANT
+object: TIGER
+size: 1.2
+units: M
+
+```
+
+Multiple messages (conversations) can be applied with the `generate()` method:
+
+```python
+from mcp_agent.mcp.prompts import load_prompt
+from mcp.types import PromptMessage
+
+prompt: List[PromptMessage] = load_prompt(Path("sizing_conversation.txt"))
+result: PromptMessageMultipart = await agent.generate(prompt)
+
+```
+
+Conversation files can also be used to include resources:
+
+prompt_secret_plans.txt
+
+```markdown
+---USER
+Please review the following documents:
+---RESOURCE
+secret_plan.pdf
+---RESOURCE
+repomix.xml
+---ASSISTANT
+Thank you for those documents, the PDF contains secret plans, and some
+source code was attached to achieve those plans. Can I help further?
+
+```
+
+It is usually better (but not necessary) to use `load_prompt_multipart`:
+
+```python
+from mcp_agent.mcp.prompts import load_prompt_multipart
+from mcp_agent.mcp.PromptMessageMultipart
+
+prompt: List[PromptMessageMultipart] = load_prompt_multipart(Path("prompt_secret_plans.txt"))
+result: PromptMessageMultipart = await agent.generate(prompt)
+
+```
+
+File Format / MCP Serialization
+
+If the filetype is `json`, then messages are deserialized using the MCP Prompt schema format. The `load_prompt`, `load_prompt_multipart` and `prompt-server` will load either the text or JSON format directly. See [History Saving](../../models/#history-saving) to learn how to save a conversation to a file for editing or playback.
+
+### Using the `prompt-server`
+
+Prompt files can also be served using the inbuilt `prompt-server`. The `prompt-server` command is installed with `fast-agent` making it convenient to set up and use:
+
+fastagent.config.yaml
+
+```yaml
+mcp:
+  servers:
+    prompts:
+      command: "prompt-server"
+      args: ["prompt_secret_plans.txt"]
+
+```
+
+This configures an MCP Server that will serve a `prompt_secret_plans` MCP Prompt, and `secret_plan.pdf` and `repomix.xml` as MCP Resources.
+
+If arguments are supplied in the template file, these are also handled by the `prompt-server`
+
+prompt_with_args.txt
+
+```markdown
+---USER
+Hello {{assistant_name}}, how are you?
+---ASSISTANT
+Great to meet you {{user_name}} how can I be of assistance?
+
+```
+
+# Deploy and Run
+
+**fast-agent** provides flexible deployment options to meet a variety of use cases, from interactive development to production server deployments.
+
+## Interactive Mode
+
+Run **fast-agent** programs interactively for development, debugging, or direct user interaction.
+
+agent.py
+
+```python
+import asyncio
+from mcp_agent.core.fastagent import FastAgent
+
+fast = FastAgent("My Interactive Agent")
+
+@fast.agent(instruction="You are a helpful assistant")
+async def main():
+    async with fast.run() as agent:
+        # Start interactive prompt
+        await agent()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+```
+
+When started with `uv run agent.py`, this begins an interactive prompt where you can chat directly with the configured agents, apply prompts, save history and so on.
+
+## Command Line Execution
+
+**fast-agent** supports command-line arguments to run agents and workflows with specific messages.
+
+```bash
+# Send a message to a specific agent
+uv run agent.py --agent default --message "Analyze this dataset"
+
+# Override the default model
+uv run agent.py --model gpt-4o --agent default --message "Complex question"
+
+# Run with minimal output
+uv run agent.py --quiet --agent default --message "Background task"
+
+```
+
+This is perfect for scripting, automation, or one-off queries.
+
+The `--quiet` flag switches off the Progress, Chat and Tool displays.
+
+## MCP Server Deployment
+
+Any **fast-agent** application can be deployed as an MCP (Message Control Protocol) server with a simple command-line switch.
+
+### Starting an MCP Server
+
+```bash
+# Start as a Streamable HTTP server (http://localhost:8080/sse)
+uv run agent.py --server --transport http --port 8080
+
+# Start as an SSE server (http://localhost:8080/mcp)
+uv run agent.py --server --transport sse --port 8080
+
+# Start as a stdio server
+uv run agent.py --server --transport stdio
+
+```
+
+Each agent exposes an MCP Tool for sending messages to the agent, and a Prompt that returns the conversation history.
+
+This enables cross-agent state transfer via the MCP Prompts.
+
+The MCP Server can also be started programatically.
+
+### Programmatic Server Startup
+
+```python
+import asyncio
+from mcp_agent.core.fastagent import FastAgent
+
+fast = FastAgent("Server Agent")
+
+@fast.agent(instruction="You are an API agent")
+async def main():
+    # Start as a server programmatically
+    await fast.start_server(
+        transport="sse",
+        host="0.0.0.0",
+        port=8080,
+        server_name="API-Agent-Server",
+        server_description="Provides API access to my agent"
+    )
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+```
+
+## Python Program Integration
+
+Embed **fast-agent** into existing Python applications to add MCP agent capabilities.
+
+```python
+import asyncio
+from mcp_agent.core.fastagent import FastAgent
+
+fast = FastAgent("Embedded Agent")
+
+@fast.agent(instruction="You are a data analysis assistant")
+async def analyze_data(data):
+    async with fast.run() as agent:
+        result = await agent.send(f"Analyze this data: {data}")
+        return result
+
+# Use in your application
+async def main():
+    user_data = get_user_data()
+    analysis = await analyze_data(user_data)
+    display_results(analysis)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+```
+
+# Model Features and History Saving
+
+Models in **fast-agent** are specified with a model string, that takes the format `provider.model_name.<reasoning_effort>`
+
+### Precedence
+
+Model specifications in fast-agent follow this precedence order (highest to lowest):
+
+1. Explicitly set in agent decorators
+1. Command line arguments with `--model` flag
+1. Default model in `fastagent.config.yaml`
+
+### Format
+
+Model strings follow this format: `provider.model_name.reasoning_effort`
+
+- **provider**: The LLM provider (e.g., `anthropic`, `openai`, `azure`, `deepseek`, `generic`,`openrouter`, `tensorzero`)
+- **model_name**: The specific model to use in API calls (for Azure, this is your deployment name)
+- **reasoning_effort** (optional): Controls the reasoning effort for supported models
+
+Examples:
+
+- `anthropic.claude-3-7-sonnet-latest`
+- `openai.gpt-4o`
+- `openai.o3-mini.high`
+- `azure.my-deployment`
+- `generic.llama3.2:latest`
+- `openrouter.google/gemini-2.5-pro-exp-03-25:free`
+- `tensorzero.my_tensorzero_function`
+
+#### Reasoning Effort
+
+For models that support it (`o1`, `o1-preview` and `o3-mini`), you can specify a reasoning effort of **`high`**, **`medium`** or **`low`** - for example `openai.o3-mini.high`. **`medium`** is the default if not specified.
+
+#### Aliases
+
+For convenience, popular models have an alias set such as `gpt-4o` or `sonnet`. These are documented on the [LLM Providers](llm_providers/) page.
+
+### Default Configuration
+
+You can set a default model for your application in your `fastagent.config.yaml`:
+
+```yaml
+default_model: "openai.gpt-4o" # Default model for all agents
+
+```
+
+### History Saving
+
+You can save the conversation history to a file by sending a `***SAVE_HISTORY <filename>` message. This can then be reviewed, edited, loaded, or served with the `prompt-server` or replayed with the `playback` model.
+
+File Format / MCP Serialization
+
+If the filetype is `json`, then messages are serialized/deserialized using the MCP Prompt schema. The `load_prompt`, `load_prompt_multipart` and `prompt-server` will load either the text or JSON format directly.
+
+This can be helpful when developing applications to:
+
+- Save a conversation for editing
+- Set up in-context learning
+- Produce realistic test scenarios to exercise edge conditions etc. with the [Playback model](internal_models/#playback)
+
+**fast-agent** comes with two internal models to aid development and testing: `passthrough` and `playback`.
+
+## Passthrough
+
+By default, the `passthrough` model echos messages sent to it.
+
+### Fixed Responses
+
+By sending a `***FIXED_RESPONSE <message>` message, the model will return `<message>` to any request.
+
+### Tool Calling
+
+By sending a `***CALL_TOOL <tool_name> [<json>]` message, the model will call the specified MCP Tool, and return a string containing the results.
+
+## Playback
+
+The `playback` model replays the first conversation sent to it. A typical usage may look like this:
+
+playback.txt
+
+```markdown
+---USER
+Good morning!
+---ASSISTANT
+Hello
+---USER
+Generate some JSON
+---ASSISTANT
+{
+   "city": "London",
+   "temperature": 72
+}
+
+```
+
+This can then be used with the `prompt-server` you can apply the MCP Prompt to the agent, either programatically with `apply_prompt` or with the `/prompts` command in the interactive shell.
+
+Alternatively, you can load the file with `load_message_multipart`.
+
+JSON contents can be converted to structured outputs:
+
+```python
+@fast.agent(name="playback",model="playback")
+
+...
+
+playback_messages: List[PromptMessageMultipart] = load_message_multipart(Path("playback.txt"))
+# Set up the Conversation
+assert ("HISTORY LOADED") == agent.playback.generate(playback_messages)
+
+response: str = agent.playback.send("Good morning!") # Returns Hello
+temperature, _ = agent.playback.structured("Generate some JSON")
+
+```
+
+When the `playback` runs out of messages, it returns `MESSAGES EXHAUSTED (list size [a]) ([b] overage)`.
+
+List size is the total number of messages originally loaded, overage is the number of requests made after exhaustion.
+
+For each model provider, you can configure parameters either through environment variables or in your `fastagent.config.yaml` file.
+
+Be sure to run `fast-agent check` to troubleshoot API Key issues:
+
+## Common Configuration Format
+
+In your `fastagent.config.yaml`:
+
+```yaml
+<provider>:
+  api_key: "your_api_key" # Override with API_KEY env var
+  base_url: "https://api.example.com" # Base URL for API calls
+
+```
+
+## Anthropic
+
+Anthropic models support Text, Vision and PDF content.
+
+**YAML Configuration:**
+
+```yaml
+anthropic:
+  api_key: "your_anthropic_key" # Required
+  base_url: "https://api.anthropic.com/v1" # Default, only include if required
+
+```
+
+**Environment Variables:**
+
+- `ANTHROPIC_API_KEY`: Your Anthropic API key
+- `ANTHROPIC_BASE_URL`: Override the API endpoint
+
+**Model Name Aliases:**
+
+| Model Alias | Maps to | Model Alias | Maps to | | --- | --- | --- | --- | | `claude` | `claude-3-7-sonnet-latest` | `haiku` | `claude-3-5-haiku-latest` | | `sonnet` | `claude-3-7-sonnet-latest` | `haiku3` | `claude-3-haiku-20240307` | | `sonnet35` | `claude-3-5-sonnet-latest` | `haiku35` | `claude-3-5-haiku-latest` | | `sonnet37` | `claude-3-7-sonnet-latest` | `opus` | `claude-3-opus-latest` | | `opus3` | `claude-3-opus-latest` | | |
+
+## OpenAI
+
+**fast-agent** supports OpenAI `gpt-4.1`, `gpt-4.1-mini`, `o1-preview`, `o1` and `o3-mini` models. Arbitrary model names are supported with `openai.<model_name>`. Supported modalities are model-dependent, check the [OpenAI Models Page](https://platform.openai.com/docs/models) for the latest information.
+
+Structured outputs use the OpenAI API Structured Outputs feature.
+
+Future versions of **fast-agent** will have enhanced model capability handling.
+
+**YAML Configuration:**
+
+```yaml
+openai:
+  api_key: "your_openai_key" # Default
+  base_url: "https://api.openai.com/v1" # Default, only include if required
+
+```
+
+**Environment Variables:**
+
+- `OPENAI_API_KEY`: Your OpenAI API key
+- `OPENAI_BASE_URL`: Override the API endpoint
+
+**Model Name Aliases:**
+
+| Model Alias | Maps to | Model Alias | Maps to | | --- | --- | --- | --- | | `gpt-4o` | `gpt-4o` | `gpt-4.1` | `gpt-4.1` | | `gpt-4o-mini` | `gpt-4o-mini` | `gpt-4.1-mini` | `gpt-4.1-mini` | | `o1` | `o1` | `gpt-4.1-nano` | `gpt-4.1-nano` | | `o1-mini` | `o1-mini` | `o1-preview` | `o1-preview` | | `o3-mini` | `o3-mini` | | |
+
+## Azure OpenAI
+
+### ⚠️ Check Model and Feature Availability by Region
+
+Before deploying an LLM model in Azure, **always check the official Azure documentation to verify that the required model and capabilities (vision, audio, etc.) are available in your region**. Availability varies by region and by feature. Use the links below to confirm support for your use case:
+
+**Key Capabilities and Official Documentation:**
+
+- **General model list & region availability:**\
+  [Azure OpenAI Service models – Region availability (Microsoft Learn)](https://learn.microsoft.com/en-us/azure/ai-services/openai/concepts/models?utm_source=chatgpt.com)
+- **Vision (GPT-4 Turbo with Vision, GPT-4o, o1, etc.):**\
+  [How-to: GPT with Vision (Microsoft Learn)](https://learn.microsoft.com/en-us/azure/ai-services/openai/how-to/gpt-with-vision?utm_source=chatgpt.com)
+- **Audio / Whisper:**\
+  [The Whisper model from OpenAI (Microsoft Learn)](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/whisper-overview?utm_source=chatgpt.com)\
+  [Audio concepts in Azure OpenAI (Microsoft Learn)](https://learn.microsoft.com/en-us/azure/ai-services/openai/concepts/audio?utm_source=chatgpt.com)
+- **PDF / Documents:**\
+  [Azure AI Foundry feature availability across clouds regions (Microsoft Learn)](https://learn.microsoft.com/en-us/azure/ai-foundry/reference/region-support?utm_source=chatgpt.com)
+
+**Summary:**
+
+- **Vision (multimodal):** Models like GPT-4 Turbo with Vision, GPT-4o, o1, etc. are only available in certain regions. In the Azure Portal, the "Model deployments" → "Add deployment" tab lists only those available in your region. See the linked guide for input limits and JSON output.
+- **Audio / Whisper:** There are two options: (1) Azure OpenAI (same `/audio/*` routes as OpenAI, limited regions), and (2) Azure AI Speech (more regions, different billing). See the links for region tables.
+- **PDF / Documents:** Azure OpenAI does not natively process PDFs. Use [Azure AI Document Intelligence](https://learn.microsoft.com/en-us/azure/ai-services/form-recognizer/) or [Azure AI Search](https://learn.microsoft.com/en-us/azure/search/) for document processing. The AI Foundry table shows where each feature is available.
+
+**Conclusion:** Before deploying, verify that your Azure resource's region supports the required model and features. If not, create the resource in a supported region or wait for general availability.
+
+Azure OpenAI provides all the capabilities of OpenAI models within Azure's secure and compliant cloud environment. fast-agent supports three authentication methods:
+
+1. Using `resource_name` and `api_key` (standard method)
+1. Using `base_url` and `api_key` (for custom endpoints or sovereign clouds)
+1. Using `base_url` and DefaultAzureCredential (for managed identity, Azure CLI, etc.)
+
+**YAML Configuration:**
+
+```yaml
+# Option 1: Standard configuration with resource_name
+azure:
+  api_key: "your_azure_openai_key" # Required unless using DefaultAzureCredential
+  resource_name: "your-resource-name" # Resource name (do NOT include if using base_url)
+  azure_deployment: "deployment-name" # Required - the model deployment name
+  api_version: "2023-05-15" # Optional, default shown
+  # Do NOT include base_url if you use resource_name
+
+# Option 2: Custom endpoint with base_url
+azure:
+  api_key: "your_azure_openai_key"
+  base_url: "https://your-resource-name.openai.azure.com/" # Full endpoint URL
+  azure_deployment: "deployment-name"
+  api_version: "2023-05-15" # Optional
+  # Do NOT include resource_name if you use base_url
+
+# Option 3: Using DefaultAzureCredential (requires azure-identity package)
+azure:
+  use_default_azure_credential: true
+  base_url: "https://your-resource-name.openai.azure.com/"
+  azure_deployment: "deployment-name"
+  api_version: "2023-05-15" # Optional
+  # Do NOT include api_key or resource_name when using DefaultAzureCredential
+
+```
+
+**Important Configuration Notes:**
+
+- Use either `resource_name` or `base_url`, not both.
+- When using `DefaultAzureCredential`, do NOT include `api_key` or `resource_name`.
+- When using `base_url`, do NOT include `resource_name`.
+- When using `resource_name`, do NOT include `base_url`.
+
+**Environment Variables:**
+
+- `AZURE_OPENAI_API_KEY`: Your Azure OpenAI API key
+- `AZURE_OPENAI_ENDPOINT`: Override the API endpoint
+
+**Model Name Format:**
+
+Use `azure.deployment-name` as the model string, where `deployment-name` is the name of your Azure OpenAI deployment.
+
+## DeepSeek
+
+DeepSeek v3 is supported for Text and Tool calling.
+
+**YAML Configuration:**
+
+```yaml
+deepseek:
+  api_key: "your_deepseek_key"
+  base_url: "https://api.deepseek.com/v1"
+
+```
+
+**Environment Variables:**
+
+- `DEEPSEEK_API_KEY`: Your DeepSeek API key
+- `DEEPSEEK_BASE_URL`: Override the API endpoint
+
+**Model Name Aliases:**
+
+| Model Alias | Maps to | | --- | --- | | `deepseek` | `deepseek-chat` | | `deepseek3` | `deepseek-chat` |
+
+## Google
+
+Google is currently supported through the OpenAI compatibility endpoint, with first-party support planned soon.
+
+**YAML Configuration:**
+
+```yaml
+google:
+  api_key: "your_google_key"
+  base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
+
+```
+
+**Environment Variables:**
+
+- `GOOGLE_API_KEY`: Your Google API key
+
+**Model Name Aliases:**
+
+*None mapped*
+
+## Generic OpenAI / Ollama
+
+Models prefixed with `generic` will use a generic OpenAI endpoint, with the defaults configured to work with Ollama [OpenAI compatibility](https://github.com/ollama/ollama/blob/main/docs/openai.md).
+
+This means that to run Llama 3.2 latest you can specify `generic.llama3.2:latest` for the model string, and no further configuration should be required.
+
+Warning
+
+The generic provider is tested for tool calling and structured generation with `qwen2.5:latest` and `llama3.2:latest`. Other models and configurations may not work as expected - use at your own risk.
+
+**YAML Configuration:**
+
+```yaml
+generic:
+  api_key: "ollama" # Default for Ollama, change as needed
+  base_url: "http://localhost:11434/v1" # Default for Ollama
+
+```
+
+**Environment Variables:**
+
+- `GENERIC_API_KEY`: Your API key (defaults to `ollama` for Ollama)
+- `GENERIC_BASE_URL`: Override the API endpoint
+
+**Usage with other OpenAI API compatible providers:** By configuring the `base_url` and appropriate `api_key`, you can connect to any OpenAI API-compatible provider.
+
+## OpenRouter
+
+Uses the [OpenRouter](https://openrouter.ai/) aggregation service. Models are accessed via an OpenAI-compatible API. Supported modalities depend on the specific model chosen on OpenRouter.
+
+Models *must* be specified using the `openrouter.` prefix followed by the full model path from OpenRouter (e.g., `openrouter.google/gemini-flash-1.5`).
+
+Warning
+
+There is an issue with between OpenRouter and Google Gemini models causing large Tool Call block content to be removed.
+
+**YAML Configuration:**
+
+```yaml
+openrouter:
+  api_key: "your_openrouter_key" # Required
+  base_url: "https://openrouter.ai/api/v1" # Default, only include to override
+
+```
+
+**Environment Variables:**
+
+- `OPENROUTER_API_KEY`: Your OpenRouter API key
+- `OPENROUTER_BASE_URL`: Override the API endpoint
+
+**Model Name Aliases:**
+
+OpenRouter does not use aliases in the same way as Anthropic or OpenAI. You must always use the `openrouter.provider/model-name` format.
+
+## TensorZero
+
+[TensorZero](https://tensorzero.com/) is an open-source framework for building production-grade LLM applications. It unifies an LLM gateway, observability, optimization, evaluations, and experimentation.
+
+At the moment, you must run the TensorZero Gateway as a separate service (e.g. using Docker). See the [TensorZero Quick Start](https://tensorzero.com/docs/quickstart) and the [TensorZero Gateway Deployment Guide](https://www.tensorzero.com/docs/gateway/deployment/) for more information on how to deploy the TensorZero Gateway.
+
+You can call a function defined in your TensorZero configuration (`tensorzero.toml`) with `fast-agent` by prefixing the function name with `tensorzero.` (e.g. `tensorzero.my_function_name`).
+
+**YAML Configuration:**
+
+```yaml
+tensorzero:
+  base_url: "http://localhost:3000" # Optional, only include to override
+
+```
+
+**Environment Variables:**
+
+None (model provider credentials should be provided to the TensorZero Gateway instead)
+
+MCP Servers are configured in the `fastagent.config.yaml` file. Secrets can be kept in `fastagent.secrets.yaml`, which follows the same format (**fast-agent** merges the contents of the two files).
+
+## Adding a STDIO Server
+
+The below shows an example of configuring an MCP Server named `server_one`.
+
+fastagent.config.yaml
+
+```yaml
+mcp:
+# name used in agent servers array
+  server_one:
+    # command to run
+    command: "npx" 
+    # list of arguments for the command
+    args: ["@modelcontextprotocol/server-brave-search"]
+    # key/value pairs of environment variables
+    env:
+      BRAVE_API_KEY: your_key
+      KEY: value
+  server_two:
+    # and so on ...
+
+```
+
+This MCP Server can then be used with an agent as follows:
+
+```python
+@fast.agent(name="Search", servers=["server_one"])
+
+```
+
+## Adding an SSE or HTTP Server
+
+To use remote MCP Servers, specify the either `http` or `sse` transport and the endpoint URL and headers:
+
+fastagent.config.yaml
+
+```yaml
+mcp:
+# name used in agent servers array
+  server_two:
+    transport: "http"
+    # url to connect
+    url: "http://localhost:8000/mcp"
+    # timeout in seconds to use for sse sessions (optional)
+    read_transport_sse_timeout_seconds: 300
+    # request headers for connection
+    headers: 
+          Authorization: "Bearer <secret>"
+
+# name used in agent servers array
+  server_three:
+    transport: "sse"
+    # url to connect
+    url: "http://localhost:8001/sse"
+
+```
+
+## Roots
+
+**fast-agent** supports MCP Roots. Roots are configured on a per-server basis:
+
+fastagent.config.yaml
+
+```yaml
+mcp:
+  server_three:
+    transport: "http"
+    url: "http://localhost:8000/mcp"
+    roots:
+       uri: "file://...." 
+       name: Optional Name
+       server_uri_alias: # optional
+
+```
+
+As per the [MCP specification](https://github.com/modelcontextprotocol/specification/blob/41749db0c4c95b97b99dc056a403cf86e7f3bc76/schema/2025-03-26/schema.ts#L1185-L1191) roots MUST be a valid URI starting with `file://`.
+
+If a server_uri_alias is supplied, **fast-agent** presents this to the MCP Server. This allows you to present a consistent interface to the MCP Server. An example of this usage would be mounting a local directory to a docker volume, and presenting it as `/mnt/data` to the MCP Server for consistency.
+
+The data analysis example (`fast-agent quickstart data-analysis` has a working example of MCP Roots).
+
+## Sampling
+
+Sampling is configured by specifying a sampling model for the MCP Server.
+
+fastagent.config.yaml
+
+```yaml
+mcp:
+  server_four:
+    transport: "http"
+    url: "http://localhost:8000/mcp"
+    sampling:
+      model: "provider.model.<reasoning_effort>"        
+
+```
+
+Read more about The model string and settings [here](../models/). Sampling requests support vision - try [`@llmindset/mcp-webcam`](https://github.com/evalstate/mcp-webcam) for an example.
+
+Below are some recommended resources for developing with the Model Context Protocol (MCP):
+
+| Resource | Description | | --- | --- | | [Working with Files and Resources](https://llmindset.co.uk/posts/2025/01/mcp-files-resources-part1/) | Examining the options MCP Server and Host developers have for sharing rich content | | [PulseMCP Community](https://www.pulsemcp.com/) | A community focussed site offering news, up-to-date directories and use-cases of MCP Servers | | [Basic Memory](https://memory.basicmachines.co/docs/introduction) | High quality, markdown based knowledge base for LLMs - also good for Agent development | | [Repomix](https://repomix.com/guide/) | Create LLM Friendly files from folders or directly from GitHub. Include as an MCP Server - or run from a script prior to create Agent inputs | | [PromptMesh Tools](https://promptmesh.io/) | High quality tools and libraries at the cutting edge of MCP development | | [mcp-hfspace](https://github.com/evalstate/mcp-hfspace) | Seamlessly connect to hundreds of Open Source models including Image and Audio generators and more | | [wong2 mcp-cli](https://github.com/wong2/mcp-cli) | A fast, lightweight, command line alternative to the official MCP Inspector |
+
+# Quick Start: State Transfer with MCP
+
+In this quick start, we'll demonstrate how **fast-agent** can transfer state between two agents using MCP Prompts.
+
+First, we'll start `agent_one` as an MCP Server, and send it some messages with the MCP Inspector tool.
+
+Next, we'll run `agent_two` and transfer the conversation from `agent_one` using an MCP Prompt.
+
+Finally, we'll take a look at **fast-agent**'s `prompt-server` and how it can assist building agent applications
+
+You'll need API Keys to connect to a [supported model](../../models/llm_providers/), or use Ollama's [OpenAI compatibility](https://github.com/ollama/ollama/blob/main/docs/openai.md) mode to use local models.
+
+The quick start also uses the MCP Inspector - check [here](https://modelcontextprotocol.io/docs/tools/inspector) for installation instructions.
+
+## Step 1: Setup **fast-agent**
+
+```bash
+# create, and change to a new directory
+mkdir fast-agent && cd fast-agent
+
+# create and activate a python environment
+uv venv
+source .venv/bin/activate
+
+# setup fast-agent
+uv pip install fast-agent-mcp
+
+# create the state transfer example
+fast-agent quickstart state-transfer
+
+```
+
+```pwsh
+# create, and change to a new directory
+md fast-agent |cd
+
+# create and activate a python environment
+uv venv
+.venv\Scripts\activate
+
+# setup fast-agent
+uv pip install fast-agent-mcp
+
+# create the state transfer example
+fast-agent quickstart state-transfer
+
+```
+
+Change to the state-transfer directory (`cd state-transfer`), rename `fastagent.secrets.yaml.example` to `fastagent.secrets.yaml` and enter the API Keys for the providers you wish to use.
+
+The supplied `fastagent.config.yaml` file contains a default of `gpt-4o` - edit this if you wish.
+
+Finally, run `uv run agent_one.py` and send a test message to make sure that everything working. Enter `stop` to return to the command line.
+
+## Step 2: Run **agent one** as an MCP Server
+
+To start `"agent_one"` as an MCP Server, run the following command:
+
+```bash
+# start agent_one as an MCP Server:
+uv run agent_one.py --server --transport sse --port 8001
+
+```
+
+```pwsh
+# start agent_one as an MCP Server:
+uv run agent_one.py --server --transport sse --port 8001
+
+```
+
+The agent is now available as an MCP Server.
+
+Note
+
+This example starts the server on port 8001. To use a different port, update the URLs in `fastagent.config.yaml` and the MCP Inspector.
+
+## Step 3: Connect and chat with **agent one**
+
+From another command line, run the Model Context Protocol inspector to connect to the agent:
+
+```bash
+# run the MCP inspector
+npx @modelcontextprotocol/inspector
+
+```
+
+```pwsh
+# run the MCP inspector
+npx @modelcontextprotocol/inspector
+
+```
+
+Choose the "Streamable HTTP" transport type, and the url `http://localhost:8001/mcp`. After clicking the `connect` button, you can interact with the agent from the `tools` tab. Use the `agent_one_send` tool to send the agent a chat message and see it's response.
+
+The conversation history can be viewed from the `prompts` tab. Use the `agent_one_history` prompt to view it.
+
+Disconnect the Inspector, then press `ctrl+c` in the command window to stop the process.
+
+## Step 4: Transfer the conversation to **agent two**
+
+We can now transfer and continue the conversation with `agent_two`.
+
+Run `agent_two` with the following command:
+
+```bash
+# start agent_two as an MCP Server:
+uv run agent_two.py
+
+```
+
+```pwsh
+# start agent_two as an MCP Server:
+uv run agent_two.py
+
+```
+
+Once started, type `'/prompts'` to see the available prompts. Select `1` to apply the Prompt from `agent_one` to `agent_two`, transferring the conversation context.
+
+You can now continue the chat with `agent_two` (potentially using different Models, MCP Tools or Workflow components).
+
+### Configuration Overview
+
+**fast-agent** uses the following configuration file to connect to the `agent_one` MCP Server:
+
+fastagent.config.yaml
+
+```yaml
+# MCP Servers
+mcp:
+    servers:
+        agent_one:
+          transport: http
+          url: http://localhost:8001/mcp
+
+```
+
+`agent_two` then references the server in it's definition:
+
+```python
+# Define the agent
+@fast.agent(name="agent_two",
+            instruction="You are a helpful AI Agent",
+            servers=["agent_one"])
+
+async def main():
+    # use the --model command line switch or agent arguments to change model
+    async with fast.run() as agent:
+        await agent.interactive()
+
+```
+
+## Step 5: Save/Reload the conversation
+
+**fast-agent** gives you the ability to save and reload conversations.
+
+Enter `***SAVE_HISTORY history.json` in the `agent_two` chat to save the conversation history in MCP `GetPromptResult` format.
+
+You can also save it in a text format for easier editing.
+
+By using the supplied MCP `prompt-server`, we can reload the saved prompt and apply it to our agent. Add the following to your `fastagent.config.yaml` file:
+
+```yaml
+# MCP Servers
+mcp:
+    servers:
+        prompts:
+            command: prompt-server
+            args: ["history.json"]
+        agent_one:
+          transport: http
+          url: http://localhost:8001/mcp
+
+```
+
+And then update `agent_two.py` to use the new server:
+
+```python
+# Define the agent
+@fast.agent(name="agent_two",
+            instruction="You are a helpful AI Agent",
+            servers=["prompts"])
+
+```
+
+Run `uv run agent_two.py`, and you can then use the `/prompts` command to load the earlier conversation history, and continue where you left off.
+
+Note that Prompts can contain any of the MCP Content types, so Images, Audio and other Embedded Resources can be included.
+
+You can also use the [Playback LLM](../../models/internal_models/) to replay an earlier chat (useful for testing!)
+
+# Integration with MCP Types
+
+## MCP Type Compatibility
+
+FastAgent is built to seamlessly integrate with the MCP SDK type system:
+
+Conversations with assistants are based on `PromptMessageMultipart` - an extension the the mcp `PromptMessage` type, with support for multiple content sections. This type is expected to become native in a future version of MCP: https://github.com/modelcontextprotocol/specification/pull/198
+
+## Message History Transfer
+
+FastAgent makes it easy to transfer conversation history between agents:
+
+history_transfer.py
+
+```python
+@fast.agent(name="haiku", model="haiku")
+@fast.agent(name="openai", model="o3-mini.medium")
+
+async def main() -> None:
+    async with fast.run() as agent:
+        # Start an interactive session with "haiku"
+        await agent.prompt(agent_name="haiku")
+        # Transfer the message history top "openai" (using PromptMessageMultipart)
+        await agent.openai.generate(agent.haiku.message_history)
+        # Continue the conversation
+        await agent.prompt(agent_name="openai")
+
+```
